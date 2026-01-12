@@ -34,11 +34,12 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
     fabricatorIds: [] as string[],
     
     // Financials
-    totalProjectPrice: '', // Input: Revenue
-    fabricatorAllocation: '', // Expense
-    materialsAllocation: '', // Expense
-    supervisorAllocation: '', // Expense
-    companyAllocation: '', // Calculated: Profit/Margin
+    spent: '',
+    fabricatorAllocation: '',
+    materialsAllocation: '',
+    supervisorAllocation: '',
+    companyAllocation: '', // Input: Your Profit
+    totalProjectPrice: '', // Output: Auto-calculated Sum
     
     supervisorAssignsFabricators: false,
     documentationUrl: ''
@@ -52,27 +53,26 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
   const fabricators = users.filter(u => u.role === 'fabricator');
   const clients = users.filter(u => u.role === 'client');
 
-  // --- NEW LOGIC: Calculate Company Allocation (Excess) ---
+  // --- SUMMATION LOGIC: Revenue + Expenses = Total Budget ---
   useEffect(() => {
-    const total = parseFloat(formData.totalProjectPrice) || 0;
     const fab = parseFloat(formData.fabricatorAllocation) || 0;
     const mat = parseFloat(formData.materialsAllocation) || 0;
     const sup = parseFloat(formData.supervisorAllocation) || 0;
+    const com = parseFloat(formData.companyAllocation) || 0;
 
-    // Company Allocation = Revenue - Expenses
-    const remaining = total - (fab + mat + sup);
+    // The Total Price is the SUM of costs + profit
+    const total = fab + mat + sup + com;
     
-    setFormData(prev => ({ ...prev, companyAllocation: remaining.toFixed(2) }));
+    setFormData(prev => ({ ...prev, totalProjectPrice: total.toFixed(2) }));
   }, [
-    formData.totalProjectPrice,
     formData.fabricatorAllocation,
     formData.materialsAllocation,
-    formData.supervisorAllocation
+    formData.supervisorAllocation,
+    formData.companyAllocation
   ]);
 
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
-
     if (!formData.name.trim()) newErrors.name = 'Project name is required';
     if (!formData.description.trim()) newErrors.description = 'Project description is required';
     if (!formData.supervisorId) newErrors.supervisorId = 'Supervisor selection is required';
@@ -85,24 +85,13 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
       newErrors.endDate = 'End date must be after start date';
     }
 
-    // Check if Company Allocation is negative (Over Budget)
-    if (parseFloat(formData.companyAllocation) < 0) {
-      newErrors.financial = 'Allocations exceed the Total Project Price.';
-    }
-
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
 
   const handleInputChange = (field: string, value: any) => {
     setFormData(prev => ({ ...prev, [field]: value }));
-    if (errors[field]) {
-      setErrors(prev => ({ ...prev, [field]: '' }));
-    }
-    // Also clear general financial error when typing in any financial field
-    if (['totalProjectPrice', 'fabricatorAllocation', 'materialsAllocation', 'supervisorAllocation'].includes(field)) {
-       setErrors(prev => ({ ...prev, financial: '' }));
-    }
+    if (errors[field]) setErrors(prev => ({ ...prev, [field]: '' }));
   };
 
   const handleAddFabricator = (fabricatorId: string) => {
@@ -117,21 +106,20 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-
     if (!validateForm()) return;
 
     try {
       setLoading(true);
-      const totalProjectPrice = parseFloat(formData.totalProjectPrice) || 0;
-      const shouldSupervisorAssign = formData.supervisorAssignsFabricators;
-      const initialStatus: Project['status'] = shouldSupervisorAssign ? '0_Created' : '1_Assigned_to_FAB';
+      const totalSum = parseFloat(formData.totalProjectPrice) || 0;
+      const profit = parseFloat(formData.companyAllocation) || 0;
+      const initialSpent = parseFloat(formData.spent) || 0;
 
       const projectData = {
         name: formData.name,
-        title: formData.name, 
+        title: formData.name,
         description: formData.description,
         clientId: formData.clientId || null,
-        status: initialStatus,
+        status: formData.supervisorAssignsFabricators ? '0_Created' : '1_Assigned_to_FAB',
         priority: formData.priority,
         startDate: format(formData.startDate, 'yyyy-MM-dd'),
         endDate: format(formData.endDate, 'yyyy-MM-dd'),
@@ -140,22 +128,16 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
         fabricatorIds: formData.supervisorAssignsFabricators ? [] : formData.fabricatorIds,
         documentationUrl: formData.documentationUrl || undefined,
         
-        // --- FINANCIAL DATA ---
-        // Revenue is the Total Price input by user
-        revenue: totalProjectPrice, 
-        totalProjectPrice: totalProjectPrice,
+        // --- FINANCIAL MAPPING ---
+        budget: totalSum,           // The Calculated Total
+        revenue: profit,            // The Company Profit
+        spent: initialSpent,        // Initial Spent
         
-        // Budget is also the Total Price (the pool of money available)
-        budget: totalProjectPrice, 
-        
-        // Spent is 0 (No actual work done yet)
-        spent: 0,
-
-        // Allocations (Breakdown of the Budget)
+        // Allocations
         fabricatorAllocation: parseFloat(formData.fabricatorAllocation) || 0,
         materialsAllocation: parseFloat(formData.materialsAllocation) || 0,
         supervisorAllocation: parseFloat(formData.supervisorAllocation) || 0,
-        companyAllocation: parseFloat(formData.companyAllocation) || 0,
+        companyAllocation: profit,
       };
 
       await onCreateProject(projectData);
@@ -204,21 +186,13 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
                   />
                   {errors.name && <p className="text-sm text-destructive">{errors.name}</p>}
                 </div>
-                
                 <div className="space-y-2">
                   <Label htmlFor="client">Client</Label>
-                  <Select 
-                    value={formData.clientId} 
-                    onValueChange={(value) => handleInputChange('clientId', value)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select Client (Optional)" />
-                    </SelectTrigger>
+                  <Select value={formData.clientId} onValueChange={(value) => handleInputChange('clientId', value)}>
+                    <SelectTrigger><SelectValue placeholder="Select Client (Optional)" /></SelectTrigger>
                     <SelectContent>
                       {clients.map(client => (
-                        <SelectItem key={client.id} value={client.id}>
-                          {client.name}
-                        </SelectItem>
+                        <SelectItem key={client.id} value={client.id}>{client.name}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -237,76 +211,49 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
                 {errors.description && <p className="text-sm text-destructive">{errors.description}</p>}
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="priority">Priority</Label>
-                <Select
-                  value={formData.priority}
-                  onValueChange={(value: Project['priority']) => handleInputChange('priority', value)}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select priority" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="low">Low</SelectItem>
-                    <SelectItem value="medium">Medium</SelectItem>
-                    <SelectItem value="high">High</SelectItem>
-                    <SelectItem value="urgent">Urgent</SelectItem>
-                  </SelectContent>
-                </Select>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="priority">Priority</Label>
+                  <Select value={formData.priority} onValueChange={(value: Project['priority']) => handleInputChange('priority', value)}>
+                    <SelectTrigger><SelectValue placeholder="Select priority" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="low">Low</SelectItem>
+                      <SelectItem value="medium">Medium</SelectItem>
+                      <SelectItem value="high">High</SelectItem>
+                      <SelectItem value="urgent">Urgent</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
             </div>
 
             {/* Timeline */}
             <div className="space-y-4">
               <h3 className="text-lg font-medium">Timeline</h3>
-
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label>Start Date</Label>
                   <Popover open={showStartCalendar} onOpenChange={setShowStartCalendar}>
                     <PopoverTrigger asChild>
                       <Button variant="outline" className="w-full justify-start text-left">
-                        <CalendarIcon className="mr-2 h-4 w-4" />
-                        {format(formData.startDate, 'PPP')}
+                        <CalendarIcon className="mr-2 h-4 w-4" />{format(formData.startDate, 'PPP')}
                       </Button>
                     </PopoverTrigger>
                     <PopoverContent className="w-auto p-0">
-                      <Calendar
-                        mode="single"
-                        selected={formData.startDate}
-                        onSelect={(date) => {
-                          if (date) {
-                            handleInputChange('startDate', date);
-                            setShowStartCalendar(false);
-                          }
-                        }}
-                        initialFocus
-                      />
+                      <Calendar mode="single" selected={formData.startDate} onSelect={(date) => { if (date) { handleInputChange('startDate', date); setShowStartCalendar(false); } }} initialFocus />
                     </PopoverContent>
                   </Popover>
                 </div>
-
                 <div className="space-y-2">
                   <Label>End Date</Label>
                   <Popover open={showEndCalendar} onOpenChange={setShowEndCalendar}>
                     <PopoverTrigger asChild>
                       <Button variant="outline" className="w-full justify-start text-left">
-                        <CalendarIcon className="mr-2 h-4 w-4" />
-                        {format(formData.endDate, 'PPP')}
+                        <CalendarIcon className="mr-2 h-4 w-4" />{format(formData.endDate, 'PPP')}
                       </Button>
                     </PopoverTrigger>
                     <PopoverContent className="w-auto p-0">
-                      <Calendar
-                        mode="single"
-                        selected={formData.endDate}
-                        onSelect={(date) => {
-                          if (date) {
-                            handleInputChange('endDate', date);
-                            setShowEndCalendar(false);
-                          }
-                        }}
-                        initialFocus
-                      />
+                      <Calendar mode="single" selected={formData.endDate} onSelect={(date) => { if (date) { handleInputChange('endDate', date); setShowEndCalendar(false); } }} initialFocus />
                     </PopoverContent>
                   </Popover>
                   {errors.endDate && <p className="text-sm text-destructive">{errors.endDate}</p>}
@@ -317,67 +264,36 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
             {/* Team Assignment */}
             <div className="space-y-4">
               <h3 className="text-lg font-medium">Team Assignment</h3>
-
               <div className="space-y-2">
                 <Label htmlFor="supervisor">Supervisor *</Label>
-                <Select
-                  value={formData.supervisorId}
-                  onValueChange={(value) => handleInputChange('supervisorId', value)}
-                >
-                  <SelectTrigger className={errors.supervisorId ? 'border-destructive' : ''}>
-                    <SelectValue placeholder="Select supervisor" />
-                  </SelectTrigger>
+                <Select value={formData.supervisorId} onValueChange={(value) => handleInputChange('supervisorId', value)}>
+                  <SelectTrigger className={errors.supervisorId ? 'border-destructive' : ''}><SelectValue placeholder="Select supervisor" /></SelectTrigger>
                   <SelectContent>
-                    {supervisors.map(supervisor => (
-                      <SelectItem key={supervisor.id} value={supervisor.id}>
-                        {supervisor.name}
-                      </SelectItem>
-                    ))}
+                    {supervisors.map(supervisor => (<SelectItem key={supervisor.id} value={supervisor.id}>{supervisor.name}</SelectItem>))}
                   </SelectContent>
                 </Select>
                 {errors.supervisorId && <p className="text-sm text-destructive">{errors.supervisorId}</p>}
               </div>
 
               <div className="flex items-center space-x-2">
-                <input
-                  id="supervisorAssignsFabricators"
-                  type="checkbox"
-                  checked={formData.supervisorAssignsFabricators}
-                  onChange={(e) => handleInputChange('supervisorAssignsFabricators', e.target.checked)}
-                  className="cursor-pointer"
-                />
-                <Label htmlFor="supervisorAssignsFabricators" className="cursor-pointer">
-                  Supervisor will assign fabricators manually
-                </Label>
+                <input id="supervisorAssignsFabricators" type="checkbox" checked={formData.supervisorAssignsFabricators} onChange={(e) => handleInputChange('supervisorAssignsFabricators', e.target.checked)} className="cursor-pointer" />
+                <Label htmlFor="supervisorAssignsFabricators" className="cursor-pointer">Supervisor will assign fabricators manually</Label>
               </div>
 
               {!formData.supervisorAssignsFabricators && (
                 <div className="space-y-2">
                   <Label>Fabricators *</Label>
                   <Select onValueChange={handleAddFabricator}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Add fabricators" />
-                    </SelectTrigger>
+                    <SelectTrigger><SelectValue placeholder="Add fabricators" /></SelectTrigger>
                     <SelectContent>
-                      {fabricators
-                        .filter(fab => !formData.fabricatorIds.includes(fab.id))
-                        .map(fabricator => (
-                          <SelectItem key={fabricator.id} value={fabricator.id}>
-                            {fabricator.name}
-                          </SelectItem>
-                        ))}
+                      {fabricators.filter(fab => !formData.fabricatorIds.includes(fab.id)).map(fabricator => (<SelectItem key={fabricator.id} value={fabricator.id}>{fabricator.name}</SelectItem>))}
                     </SelectContent>
                   </Select>
-
                   {formData.fabricatorIds.length > 0 && (
                     <div className="flex flex-wrap gap-2 mt-2">
                       {formData.fabricatorIds.map(id => (
                         <Badge key={id} variant="secondary" className="flex items-center gap-1">
-                          {getFabricatorName(id)}
-                          <X
-                            className="h-3 w-3 cursor-pointer"
-                            onClick={() => handleRemoveFabricator(id)}
-                          />
+                          {getFabricatorName(id)} <X className="h-3 w-3 cursor-pointer" onClick={() => handleRemoveFabricator(id)} />
                         </Badge>
                       ))}
                     </div>
@@ -388,94 +304,60 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
             </div>
 
             {/* Financial Allocation */}
-            <div className="space-y-4">
+            <div className="space-y-4 border-t pt-4">
               <div className="flex items-end justify-between">
-                <h3 className="text-lg font-medium">Financial Allocation</h3>
-                <div className="text-sm text-muted-foreground">Planning</div>
-              </div>
-
-              {/* Input for Total Price */}
-              <div className="space-y-2">
-                <Label htmlFor="totalProjectPrice" className="text-lg font-semibold text-primary">
-                  Total Project Price (Revenue) ₱
-                </Label>
-                <Input
-                  id="totalProjectPrice"
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={formData.totalProjectPrice}
-                  onChange={(e) => handleInputChange('totalProjectPrice', e.target.value)}
-                  placeholder="e.g. 100000"
-                  className="text-lg font-bold"
-                />
+                <h3 className="text-lg font-medium">Financial Allocations</h3>
+                <div className="text-sm text-muted-foreground">Total = Sum of Allocations</div>
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="fabricatorAllocation">Fabricator Allocation (₱)</Label>
-                  <Input
-                    id="fabricatorAllocation"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={formData.fabricatorAllocation}
-                    onChange={(e) => handleInputChange('fabricatorAllocation', e.target.value)}
-                    placeholder="0.00"
-                  />
-                  <p className="text-xs text-muted-foreground">Labor costs for fabricators.</p>
+                  <Input id="fabricatorAllocation" type="number" min="0" step="0.01" value={formData.fabricatorAllocation} onChange={(e) => handleInputChange('fabricatorAllocation', e.target.value)} placeholder="0.00" />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="materialsAllocation">Materials Allocation (₱)</Label>
-                  <Input
-                    id="materialsAllocation"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={formData.materialsAllocation}
-                    onChange={(e) => handleInputChange('materialsAllocation', e.target.value)}
-                    placeholder="0.00"
-                  />
-                  <p className="text-xs text-muted-foreground">Expected material costs.</p>
+                  <Input id="materialsAllocation" type="number" min="0" step="0.01" value={formData.materialsAllocation} onChange={(e) => handleInputChange('materialsAllocation', e.target.value)} placeholder="0.00" />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="supervisorAllocation">Supervisor Allocation (₱)</Label>
-                  <Input
-                    id="supervisorAllocation"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={formData.supervisorAllocation}
-                    onChange={(e) => handleInputChange('supervisorAllocation', e.target.value)}
-                    placeholder="0.00"
-                  />
-                  <p className="text-xs text-muted-foreground">Supervisor fees/overhead.</p>
+                  <Input id="supervisorAllocation" type="number" min="0" step="0.01" value={formData.supervisorAllocation} onChange={(e) => handleInputChange('supervisorAllocation', e.target.value)} placeholder="0.00" />
                 </div>
                 
-                {/* Calculated Company Allocation */}
+                {/* --- COMPANY ALLOCATION (PROFIT) INPUT --- */}
                 <div className="space-y-2">
-                  <Label htmlFor="companyAllocation" className="flex items-center gap-2">
-                    Company Allocation (Profit)
-                    {parseFloat(formData.companyAllocation) < 0 && (
-                      <Badge variant="destructive" className="text-xs">Over Budget</Badge>
-                    )}
+                  <Label htmlFor="companyAllocation" className="text-green-600">Company Allocation (Profit)</Label>
+                  <Input 
+                    id="companyAllocation" 
+                    type="number" min="0" step="0.01" 
+                    value={formData.companyAllocation} 
+                    onChange={(e) => handleInputChange('companyAllocation', e.target.value)} 
+                    placeholder="0.00" 
+                    className="border-green-200 focus:border-green-500"
+                  />
+                  <p className="text-xs text-muted-foreground">Input your desired profit here.</p>
+                </div>
+
+                {/* --- TOTAL PRICE (AUTO-SUM) --- */}
+                <div className="space-y-2 md:col-span-2">
+                  <Label className="flex items-center justify-between text-lg font-semibold text-primary">
+                    <span>Total Project Price (Client Budget)</span>
+                    <span className="text-sm font-normal text-muted-foreground">Auto-Sum</span>
                   </Label>
                   <Input
-                    id="companyAllocation"
                     readOnly
-                    value={formData.companyAllocation}
-                    className={`font-medium ${parseFloat(formData.companyAllocation) < 0 ? 'border-destructive text-destructive' : 'bg-muted'}`}
+                    value={formData.totalProjectPrice}
+                    placeholder="0.00"
+                    className="text-lg font-bold bg-muted"
                   />
-                  <p className="text-xs text-muted-foreground">Auto-calculated (Total - Allocations).</p>
+                </div>
+
+                <div className="space-y-2 md:col-span-2">
+                   <Label htmlFor="spent">Initial Spent (Optional)</Label>
+                   <Input id="spent" type="number" value={formData.spent} onChange={(e) => handleInputChange('spent', e.target.value)} placeholder="0.00" />
+                   <p className="text-xs text-muted-foreground">Only enter if this project already has expenses.</p>
                 </div>
               </div>
-              
-              {errors.financial && (
-                <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 p-3 rounded-md">
-                  <AlertCircle className="h-4 w-4" />
-                  {errors.financial}
-                </div>
-              )}
             </div>
 
             {/* Documentation */}
@@ -483,27 +365,14 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
               <h3>Documentation (Optional)</h3>
               <div className="space-y-2">
                 <Label htmlFor="documentationUrl">Google Drive Documentation URL</Label>
-                <Input
-                  id="documentationUrl"
-                  type="url"
-                  value={formData.documentationUrl}
-                  onChange={(e) => handleInputChange('documentationUrl', e.target.value)}
-                  placeholder="https://drive.google.com/drive/folders/..."
-                />
+                <Input id="documentationUrl" type="url" value={formData.documentationUrl} onChange={(e) => handleInputChange('documentationUrl', e.target.value)} placeholder="https://drive.google.com/drive/folders/..." />
               </div>
             </div>
 
             <div className="flex gap-4">
-              <Button type="button" variant="outline" onClick={onClose} className="flex-1" disabled={loading}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={onClose} className="flex-1" disabled={loading}>Cancel</Button>
               <Button type="submit" className="flex-1" disabled={loading}>
-                {loading ? 'Creating...' : (
-                  <>
-                    <Plus className="h-4 w-4 mr-2" />
-                    Create Project
-                  </>
-                )}
+                {loading ? 'Creating...' : <><Plus className="h-4 w-4 mr-2" />Create Project</>}
               </Button>
             </div>
           </form>
