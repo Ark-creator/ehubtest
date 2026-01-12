@@ -2,6 +2,25 @@
 
 // Simple PHP API router to replace Node/Express backend
 
+header("Access-Control-Allow-Origin: *");
+header("Content-Type: application/json; charset=UTF-8");
+header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type, Access-Control-Allow-Headers, Authorization, X-Requested-With");
+
+// 2. Handle Preflight Requests (OPTIONS method)
+if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
+
+// 3. Require your Config (Database Connection)
+// Make sure this file actually exists!
+if (!file_exists(__DIR__ . '/config.php')) {
+    http_response_code(500);
+    echo json_encode(["error" => "Configuration file missing"]);
+    exit;
+}
+
 require __DIR__ . '/config.php';
 
 $method = $_SERVER['REQUEST_METHOD'];
@@ -73,6 +92,11 @@ switch ($method . ' ' . $path) {
         handle_create_client($pdo);
         break;
 
+        // create supervisor
+    case 'POST /users/supervisor':
+        handle_create_supervisor($pdo);
+        break;
+
     case 'POST /auth/logout':
         handle_logout();
         break;
@@ -81,12 +105,405 @@ switch ($method . ' ' . $path) {
         handle_me($pdo);
         break;
 
+    case 'GET /debug/test-password':
+        // Debug endpoint to test password verification
+        $stmt = $pdo->prepare('SELECT email, password_hash FROM users WHERE email = :email LIMIT 1');
+        $stmt->execute([':email' => 'admin@ehub.com']);
+        $user = $stmt->fetch();
+        
+        $testPassword = 'admin123';
+        $result = [
+            'email' => $user['email'] ?? 'not found',
+            'hash_exists' => !empty($user['password_hash']),
+            'hash_length' => strlen($user['password_hash'] ?? ''),
+            'hash_prefix' => substr($user['password_hash'] ?? '', 0, 7),
+            'actual_hash' => $user['password_hash'] ?? '',
+            'test_password' => $testPassword,
+            'verification_result' => password_verify($testPassword, $user['password_hash'] ?? ''),
+            'php_version' => PHP_VERSION
+        ];
+        json_response($result);
+        break;
+
+    case 'PUT /projects/:id':
+        // Handle path parameter parsing manually since switch doesn't support regex directly
+        // But for this simple router, we can assume ID is passed in URL logic if we used regex router.
+        // Since we don't have regex router, we might need a different approach or just fallback.
+        // Actually, let's stick to the current pattern.
+        // For simple REST without regex router, we can't easily match /projects/123.
+        // We'll use a hack or expected query param if possible, OR just check prefix.
+        handle_update_project($pdo, $path);
+        break;
+
+    case 'DELETE /projects/:id':
+        handle_delete_project($pdo, $path);
+        break;
+    
+    // Using string matching for exact paths for new endpoints
+    case 'POST /projects/broadcast-fabricators':
+        handle_broadcast_fabricators($pdo);
+        break;
+
+    case 'POST /projects/respond-assignment':
+        handle_respond_assignment($pdo);
+        break;
+
+    // We need to handle dynamic routes manually in the default or before switch
     default:
-        json_response(['error' => 'Not found'], 404);
+        // Simple manual router for dynamic paths
+        if (preg_match('#^PUT /projects/([^/]+)$#', $method . ' ' . $path, $matches)) {
+            handle_update_project($pdo, $matches[1]);
+        } elseif (preg_match('#^DELETE /projects/([^/]+)$#', $method . ' ' . $path, $matches)) {
+            handle_delete_project($pdo, $matches[1]);
+        } else {
+            json_response(['error' => 'Not found'], 404);
+        }
 }
 
 // --- Handlers ---
 
+// Update handle_create_project to support broadcasting to all supervisors
+function handle_create_project(PDO $pdo): void
+{
+    require_login();
+    $body = sanitize_recursive(json_input());
+
+    $projectId = 'project-' . time();
+
+    $title = $body['name'] ?? $body['title'] ?? null;
+    if (!$title) {
+        json_response(['error' => 'Project title is required'], 400);
+    }
+
+    $pendingSupervisors = [];
+    if (!empty($body['broadcastToSupervisors'])) {
+        // Fetch all active supervisors
+        $stmt = $pdo->query("SELECT id FROM users WHERE role = 'supervisor' AND is_active = 1");
+        $supervisors = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $pendingSupervisors = $supervisors;
+    }
+
+    $stmt = $pdo->prepare(
+        'INSERT INTO projects (id, title, description, status, priority, progress, start_date, due_date, budget, client_id, supervisor_id, fabricator_ids, pending_supervisors)
+         VALUES (:id, :title, :description, :status, :priority, :progress, :start_date, :due_date, :budget, :client_id, :supervisor_id, :fabricator_ids, :pending_supervisors)'
+    );
+
+    $stmt->execute([
+        ':id' => $projectId,
+        ':title' => $title,
+        ':description' => $body['description'] ?? null,
+        ':status' => $body['status'] ?? 'planning',
+        ':priority' => $body['priority'] ?? 'medium',
+        ':progress' => $body['progress'] ?? 0,
+        ':start_date' => $body['startDate'] ?? null,
+        ':due_date' => $body['endDate'] ?? ($body['dueDate'] ?? null),
+        ':budget' => $body['budget'] ?? null,
+        ':client_id' => $body['clientId'] ?? null,
+        ':supervisor_id' => $body['supervisorId'] ?? null,
+        ':fabricator_ids' => isset($body['fabricatorIds']) ? json_encode($body['fabricatorIds']) : json_encode([]),
+        ':pending_supervisors' => json_encode($pendingSupervisors),
+    ]);
+
+    $stmt = $pdo->prepare('SELECT * FROM projects WHERE id = :id LIMIT 1');
+    $stmt->execute([':id' => $projectId]);
+    $project = $stmt->fetch();
+
+    json_response($project);
+}
+
+function handle_update_project(PDO $pdo, string $id): void
+{
+    require_login();
+    $body = sanitize_recursive(json_input());
+    
+    // Build dynamic update query
+    $fields = [];
+    $params = [':id' => $id];
+    
+    // Allowed fields to update
+    $allowed = [
+        'title', 'description', 'status', 'priority', 'progress', 
+        'start_date', 'due_date', 'budget', 'client_id', 'supervisor_id'
+    ];
+    
+    foreach ($allowed as $field) {
+        // Map frontend camelCase to snake_case if needed, but for now assuming frontend sends matching or handled manually
+        // Let's handle some common mappings
+        $val = null;
+        if (isset($body[$field])) $val = $body[$field];
+        // Handle camelCase variations if passed from frontend
+        if ($field === 'start_date' && isset($body['startDate'])) $val = $body['startDate'];
+        if ($field === 'due_date' && isset($body['dueDate'])) $val = $body['dueDate'];
+        if ($field === 'client_id' && isset($body['clientId'])) $val = $body['clientId'];
+        if ($field === 'supervisor_id' && isset($body['supervisorId'])) $val = $body['supervisorId'];
+
+        if ($val !== null) {
+            $fields[] = "$field = :$field";
+            $params[":$field"] = $val;
+        }
+    }
+
+    if (isset($body['fabricatorIds'])) {
+        $fields[] = "fabricator_ids = :fabricator_ids";
+        $params[':fabricator_ids'] = json_encode($body['fabricatorIds']);
+    }
+
+     // Handle broadcast to supervisors on update if requested
+    if (!empty($body['broadcastToSupervisors'])) {
+         $stmt = $pdo->query("SELECT id FROM users WHERE role = 'supervisor' AND is_active = 1");
+         $supervisors = $stmt->fetchAll(PDO::FETCH_COLUMN);
+         $fields[] = "pending_supervisors = :pending_supervisors";
+         $params[':pending_supervisors'] = json_encode($supervisors);
+    }
+    
+    if (empty($fields)) {
+        json_response(['message' => 'No changes provided']);
+    }
+    
+    $sql = "UPDATE projects SET " . implode(', ', $fields) . " WHERE id = :id";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    
+    $stmt = $pdo->prepare('SELECT * FROM projects WHERE id = :id LIMIT 1');
+    $stmt->execute([':id' => $id]);
+    $project = $stmt->fetch();
+    
+    json_response($project);
+}
+
+function handle_delete_project(PDO $pdo, string $id): void
+{
+    require_login();
+    // Only admin can delete? For now let supervisor/admin delete
+    $stmt = $pdo->prepare('DELETE FROM projects WHERE id = :id');
+    $stmt->execute([':id' => $id]);
+    json_response(['message' => 'Project deleted']);
+}
+
+function handle_broadcast_fabricators(PDO $pdo): void
+{
+    require_login();
+    $body = sanitize_recursive(json_input());
+    $projectId = $body['projectId'] ?? null;
+    $message = $body['message'] ?? '';
+
+    if (!$projectId) {
+        json_response(['error' => 'Project ID is required'], 400);
+    }
+
+    // Get all active fabricators
+    $stmt = $pdo->query("SELECT id FROM users WHERE role = 'fabricator' AND is_active = 1");
+    $fabricators = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+    if (empty($fabricators)) {
+         json_response(['message' => 'No active fabricators found']);
+    }
+
+    // Create pending assignments structures
+    $newAssignments = [];
+    foreach ($fabricators as $fabId) {
+        $newAssignments[] = [
+            'id' => 'pa-' . time() . '-' . substr(md5($fabId), 0, 5),
+            'projectId' => $projectId,
+            'fabricatorId' => $fabId,
+            'assignedBy' => $_SESSION['user_id'],
+            'assignedAt' => gmdate('c'),
+            'status' => 'pending',
+            'message' => $message
+        ];
+    }
+
+    // Fetch existing pending assignments to merge or replace?
+    // Usually "Send to All" might append or replace. Let's append but check duplicates.
+    $stmt = $pdo->prepare('SELECT pending_assignments FROM projects WHERE id = :id');
+    $stmt->execute([':id' => $projectId]);
+    $row = $stmt->fetch();
+    
+    $existing = json_decode($row['pending_assignments'] ?? '[]', true) ?: [];
+    
+    // Filter out fabricators already in existing pending
+    $existingFabIds = array_column($existing, 'fabricatorId');
+    $finalAssignments = $existing;
+    
+    foreach ($newAssignments as $new) {
+        if (!in_array($new['fabricatorId'], $existingFabIds)) {
+            $finalAssignments[] = $new;
+        }
+    }
+
+    $stmt = $pdo->prepare('UPDATE projects SET pending_assignments = :pa, status = :status WHERE id = :id');
+    $stmt->execute([
+        ':pa' => json_encode($finalAssignments),
+        ':status' => 'pending-assignment',
+        ':id' => $projectId
+    ]);
+
+    json_response(['message' => 'Broadcasted to ' . count($fabricators) . ' fabricators', 'assignments' => $finalAssignments]);
+}
+
+function handle_create_supervisor(PDO $pdo): void {
+    require_login();
+    if ($_SESSION['role'] !== 'admin') {
+        json_response(['error' => 'Only administrators can create supervisors'], 403);
+    }
+
+    $body = sanitize_input(get_json_input());
+
+    $required = ['name', 'email', 'password', 'phone', 'department'];
+    foreach ($required as $field) {
+        if (empty($body[$field])) {
+            json_response(['error' => ucfirst($field) . ' is required'], 400);
+        }
+    }
+
+    $name       = trim($body['name']);
+    $email      = strtolower(trim($body['email']));
+    $password   = $body['password'];
+    $phone      = trim($body['phone']);
+    $department = trim($body['department']);
+
+    // Basic validation
+    if (strlen($password) < 6) {
+        json_response(['error' => 'Password must be at least 6 characters'], 400);
+    }
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        json_response(['error' => 'Invalid email format'], 400);
+    }
+    if (!preg_match('/^(\+639|09)\d{9}$/', $phone)) {
+        json_response(['error' => 'Invalid Philippine phone number format'], 400);
+    }
+
+    // Check duplicate
+    $stmt = $pdo->prepare("SELECT id FROM users WHERE email = ? OR phone = ?");
+    $stmt->execute([$email, $phone]);
+    if ($stmt->fetch()) {
+        json_response(['error' => 'Email or phone number already registered'], 409);
+    }
+
+    // Generate identifiers
+    $time = time();
+    $secureId = 'SUP' . strtoupper(base_convert($time, 10, 36)) . 
+                strtoupper(substr(bin2hex(random_bytes(3)), 0, 4));
+    $employeeNumber = 'S' . substr((string)$time, -7) . 
+                      str_pad(random_int(0, 999), 3, '0', STR_PAD_LEFT);
+
+    $passwordHash = password_hash($password, PASSWORD_BCRYPT);
+    $userId = 'sup-' . $time . '-' . random_int(100, 999);
+
+    $stmt = $pdo->prepare("
+        INSERT INTO users 
+        (id, name, email, password_hash, role, phone, department, secure_id, employee_number, is_active, created_at)
+        VALUES (?, ?, ?, ?, 'supervisor', ?, ?, ?, ?, 1, NOW())
+    ");
+
+    $stmt->execute([
+        $userId, $name, $email, $passwordHash, $phone, $department, $secureId, $employeeNumber
+    ]);
+
+    json_response([
+        'message' => 'Supervisor created successfully',
+        'user' => [
+            'id'              => $userId,
+            'name'            => $name,
+            'email'           => $email,
+            'role'            => 'supervisor',
+            'phone'           => $phone,
+            'department'      => $department,
+            'secure_id'       => $secureId,
+            'employee_number' => $employeeNumber,
+        ]
+    ], 201);
+}
+
+function handle_respond_assignment(PDO $pdo): void
+{
+    require_login();
+    $body = sanitize_recursive(json_input());
+    $projectId = $body['projectId'] ?? null;
+    $assignmentId = $body['assignmentId'] ?? null; // If accepting specific assignment ID
+    $response = $body['response'] ?? 'accepted'; // accepted or declined
+    $role = $_SESSION['role'];
+    $userId = $_SESSION['user_id'];
+
+    if (!$projectId) {
+         json_response(['error' => 'Project ID is required'], 400);
+    }
+    
+    // 1. Handle Supervisor Response (to a pending_supervisors broadcast)
+    if ($role === 'supervisor') {
+         // Check if this supervisor is in pending_supervisors
+         $stmt = $pdo->prepare('SELECT pending_supervisors FROM projects WHERE id = :id');
+         $stmt->execute([':id' => $projectId]);
+         $proj = $stmt->fetch();
+         $pendingSups = json_decode($proj['pending_supervisors'] ?? '[]', true) ?: [];
+         
+         if (in_array($userId, $pendingSups)) {
+             if ($response === 'accepted') {
+                 // Assign this supervisor, clear pending
+                 $stmt = $pdo->prepare('UPDATE projects SET supervisor_id = :sid, pending_supervisors = NULL WHERE id = :pid');
+                 $stmt->execute([':sid' => $userId, ':pid' => $projectId]);
+                 json_response(['message' => 'Project accepted', 'status' => 'accepted']);
+             } else {
+                 // Declined: remove from pending list
+                 $newPending = array_values(array_diff($pendingSups, [$userId]));
+                 $stmt = $pdo->prepare('UPDATE projects SET pending_supervisors = :ps WHERE id = :pid');
+                 $stmt->execute([':ps' => json_encode($newPending), ':pid' => $projectId]);
+                 json_response(['message' => 'Project declined', 'status' => 'declined']);
+             }
+         }
+    }
+
+    // 2. Handle Fabricator Response
+    if ($role === 'fabricator') {
+        $stmt = $pdo->prepare('SELECT pending_assignments, fabricator_ids FROM projects WHERE id = :id');
+        $stmt->execute([':id' => $projectId]);
+        $proj = $stmt->fetch();
+        
+        $pending = json_decode($proj['pending_assignments'] ?? '[]', true) ?: [];
+        $currentFabs = json_decode($proj['fabricator_ids'] ?? '[]', true) ?: [];
+        
+        $foundIndex = -1;
+        // Find assignment by ID or by fabricatorID if ID not sent
+        foreach ($pending as $idx => $assign) {
+            if (($assignmentId && $assign['id'] === $assignmentId) || $assign['fabricatorId'] === $userId) {
+                $foundIndex = $idx;
+                break;
+            }
+        }
+        
+        if ($foundIndex !== -1) {
+            if ($response === 'accepted') {
+                $pending[$foundIndex]['status'] = 'accepted';
+                $pending[$foundIndex]['respondedAt'] = gmdate('c');
+                
+                // Add to main fabricator list if not there
+                if (!in_array($userId, $currentFabs)) {
+                    $currentFabs[] = $userId;
+                }
+                
+                $stmt = $pdo->prepare('UPDATE projects SET pending_assignments = :pa, fabricator_ids = :fids, status = :status WHERE id = :id');
+                $stmt->execute([
+                    ':pa' => json_encode($pending),
+                    ':fids' => json_encode($currentFabs),
+                    ':status' => 'in-progress', // Set to in-progress when someone accepts? Or keep pending-assignment? Let's say in-progress.
+                    ':id' => $projectId
+                ]);
+            } else {
+                $pending[$foundIndex]['status'] = 'declined';
+                $pending[$foundIndex]['respondedAt'] = gmdate('c');
+                
+                // If declined, we just update the status in pending list
+                $stmt = $pdo->prepare('UPDATE projects SET pending_assignments = :pa WHERE id = :id');
+                $stmt->execute([':pa' => json_encode($pending), ':id' => $projectId]);
+            }
+            json_response(['message' => 'Assignment ' . $response, 'assignments' => $pending]);
+        } else {
+            json_response(['error' => 'No pending assignment found'], 404);
+        }
+    }
+    
+    json_response(['message' => 'No action taken']);
+}
 function handle_login(PDO $pdo): void
 {
     $body = sanitize_recursive(json_input());
@@ -97,11 +514,18 @@ function handle_login(PDO $pdo): void
         json_response(['error' => 'Identifier and password are required'], 400);
     }
 
-    // Try to match by email, secure_id or employee_number
-    $stmt = $pdo->prepare(
-        'SELECT * FROM users WHERE (secure_id = :id OR employee_number = :id OR email = :id) AND is_active = 1 LIMIT 1'
-    );
-    $stmt->execute([':id' => $identifier]);
+    // Try to match by email, secure_id, employee_number, or id
+    // Also handle 'admin' shorthand mapping to the admin user
+    $searchId = $identifier;
+    if (strtolower($identifier) === 'admin') {
+        $stmt = $pdo->prepare('SELECT * FROM users WHERE role = "admin" AND is_active = 1 LIMIT 1');
+        $stmt->execute();
+    } else {
+        $stmt = $pdo->prepare(
+            'SELECT * FROM users WHERE (id = :id OR secure_id = :id OR employee_number = :id OR email = :id) AND is_active = 1 LIMIT 1'
+        );
+        $stmt->execute([':id' => $searchId]);
+    }
     $user = $stmt->fetch();
 
     if (!$user) {
@@ -230,44 +654,7 @@ function handle_get_projects(PDO $pdo): void
     json_response($projects);
 }
 
-function handle_create_project(PDO $pdo): void
-{
-    require_login();
-    $body = sanitize_recursive(json_input());
 
-    $projectId = 'project-' . time();
-
-    $title = $body['name'] ?? $body['title'] ?? null;
-    if (!$title) {
-        json_response(['error' => 'Project title is required'], 400);
-    }
-
-    $stmt = $pdo->prepare(
-        'INSERT INTO projects (id, title, description, status, priority, progress, start_date, due_date, budget, client_id, supervisor_id, fabricator_ids)
-         VALUES (:id, :title, :description, :status, :priority, :progress, :start_date, :due_date, :budget, :client_id, :supervisor_id, :fabricator_ids)'
-    );
-
-    $stmt->execute([
-        ':id' => $projectId,
-        ':title' => $title,
-        ':description' => $body['description'] ?? null,
-        ':status' => $body['status'] ?? 'planning',
-        ':priority' => $body['priority'] ?? 'medium',
-        ':progress' => $body['progress'] ?? 0,
-        ':start_date' => $body['startDate'] ?? null,
-        ':due_date' => $body['endDate'] ?? ($body['dueDate'] ?? null),
-        ':budget' => $body['budget'] ?? null,
-        ':client_id' => $body['clientId'] ?? null,
-        ':supervisor_id' => $body['supervisorId'] ?? null,
-        ':fabricator_ids' => isset($body['fabricatorIds']) ? json_encode($body['fabricatorIds']) : json_encode([]),
-    ]);
-
-    $stmt = $pdo->prepare('SELECT * FROM projects WHERE id = :id LIMIT 1');
-    $stmt->execute([':id' => $projectId]);
-    $project = $stmt->fetch();
-
-    json_response($project);
-}
 
 function handle_get_tasks(PDO $pdo): void
 {
@@ -455,5 +842,3 @@ function handle_create_client(PDO $pdo): void
 
     json_response(['user' => $user]);
 }
-
-

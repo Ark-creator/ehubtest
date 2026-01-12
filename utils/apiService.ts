@@ -1,6 +1,6 @@
 // API Service for PHP backend (cPanel/shared hosting friendly)
-// Use VITE_API_URL when provided, otherwise default to same-origin `/api`
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+// Use VITE_API_URL when provided, otherwise default to same-origin /api
+const API_BASE_URL = '/api';
 
 interface ApiResponse<T> {
     data?: T;
@@ -24,6 +24,7 @@ class ApiService {
         retryCount: number = 0
     ): Promise<ApiResponse<T>> {
         const url = `${this.baseUrl}${endpoint}`;
+
         const headers: HeadersInit = {
             'Content-Type': 'application/json',
             ...options.headers,
@@ -37,7 +38,6 @@ class ApiService {
             const response = await fetch(url, {
                 ...options,
                 headers,
-                credentials: 'include',
             });
 
             if (response.status === 429) {
@@ -197,6 +197,14 @@ class ApiService {
     // Users methods
     async getUsers(): Promise<ApiResponse<any[]>> {
         return this.request('/users');
+    }
+
+    // create supervisor
+    async createSupervisor(supervisorData: any): Promise<ApiResponse<any>> {
+        return this.request('/users/supervisor', {
+            method: 'POST',
+            body: JSON.stringify(supervisorData),
+        });
     }
 
     async createClient(clientData: any): Promise<ApiResponse<any>> {

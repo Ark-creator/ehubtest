@@ -1,32 +1,26 @@
 <?php
 
 
-$allowed_origins = ['http://localhost:3000', 'http://localhost:5174']; 
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-
-if (in_array($origin, $allowed_origins)) {
-    header("Access-Control-Allow-Origin: $origin");
-    header('Access-Control-Allow-Credentials: true');
+// Start session for auth
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
 }
+
+header('Content-Type: application/json; charset=utf-8');
+header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 
-// Handle Preflight OPTIONS request
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit;
 }
 
-// 2. Start Session AFTER headers are ready
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
 // Database config – adjust to match your phpMyAdmin/MySQL setup if needed
 $dbHost = getenv('DB_HOST') ?: 'localhost';
-$dbUser = getenv('DB_USER') ?: 'root';         // Fixed: Default XAMPP user
-$dbPass = getenv('DB_PASSWORD') ?: '';         // Fixed: Default XAMPP pass is empty
-$dbName = getenv('DB_NAME') ?: 'ehubph_pms2';   // Fixed: Corrected typo (ehub_pms -> ehubph_pms)
+$dbUser = getenv('DB_USER') ?: 'root';
+$dbPass = getenv('DB_PASSWORD') ?: '';
+$dbName = getenv('DB_NAME') ?: 'ehubph_pms';
 $dbPort = getenv('DB_PORT') ?: '3306';
 
 try {

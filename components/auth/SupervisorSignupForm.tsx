@@ -18,22 +18,19 @@ import {
 } from "../ui/select";
 import { Badge } from "../ui/badge";
 import { Alert, AlertDescription } from "../ui/alert";
-import { X, UserPlus, Shield } from "lucide-react";
-import { User } from "../../types";
-import {
-  generateSecureId,
-  generateEmployeeNumber,
-} from "../../utils/secureId";
+import { X, UserPlus, Shield, Loader2 } from "lucide-react";
 import { apiService } from "../../utils/apiService";
 
 interface SupervisorSignupFormProps {
-  onSignup: (user: User) => void;
+  onSignup?: (user: any) => void; // optional - if parent needs the created user
   onClose: () => void;
+  onSuccess?: () => void; // optional - refresh list, show toast, etc.
 }
 
 export function SupervisorSignupForm({
   onSignup,
   onClose,
+  onSuccess,
 }: SupervisorSignupFormProps) {
   const [formData, setFormData] = useState({
     name: "",
@@ -42,7 +39,9 @@ export function SupervisorSignupForm({
     phone: "",
     department: "",
   });
+
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [submitError, setSubmitError] = useState<string>("");
   const [isLoading, setIsLoading] = useState(false);
 
   const departments = [
@@ -58,76 +57,69 @@ export function SupervisorSignupForm({
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
 
-    if (!formData.name.trim()) {
-      newErrors.name = "Full name is required";
-    }
+    if (!formData.name.trim()) newErrors.name = "Full name is required";
+    if (!formData.email.trim()) newErrors.email = "Email is required";
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email))
+      newErrors.email = "Invalid email format";
 
-    if (!formData.email.trim()) {
-      newErrors.email = "Email is required";
-    } else if (
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)
-    ) {
-      newErrors.email = "Please enter a valid email address";
-    }
+    if (!formData.password) newErrors.password = "Password is required";
+    else if (formData.password.length < 6)
+      newErrors.password = "Password must be at least 6 characters";
 
-    if (!formData.password.trim()) {
-      newErrors.password = "Password is required";
-    } else if (formData.password.length < 6) {
-      newErrors.password =
-        "Password must be at least 6 characters";
-    }
+    if (!formData.phone.trim()) newErrors.phone = "Phone number is required";
+    else if (!/^(\+639|09)\d{9}$/.test(formData.phone))
+      newErrors.phone = "Use valid PH format: +639xxxxxxxxx or 09xxxxxxxxx";
 
-    if (!formData.phone.trim()) {
-      newErrors.phone = "Phone number is required";
-    } else if (!/^(\+639|09)\d{9}$/.test(formData.phone)) {
-      newErrors.phone =
-        "Please enter a valid Philippine phone number";
-    }
-
-    if (!formData.department) {
-      newErrors.department = "Department selection is required";
-    }
+    if (!formData.department) newErrors.department = "Department is required";
 
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
 
-  const handleInputChange = (field: string, value: string) => {
+  const handleChange = (field: keyof typeof formData, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
-    // Clear error when user starts typing
-    if (errors[field]) {
-      setErrors((prev) => ({ ...prev, [field]: "" }));
-    }
+    if (errors[field]) setErrors((prev) => ({ ...prev, [field]: "" }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSubmitError("");
 
-    if (!validateForm()) {
-      return;
-    }
+    if (!validateForm()) return;
 
     setIsLoading(true);
 
     try {
-      // For now, create a local supervisor user since we don't have the supervisor endpoint yet
-      const newUser: User = {
-        id: `user-${Date.now()}`,
-        name: formData.name,
-        email: formData.email.toLowerCase(),
-        role: "supervisor",
-        school: formData.department,
-        secureId: generateSecureId('supervisor'),
-        employeeNumber: generateEmployeeNumber(),
-        phone: formData.phone,
-        password: formData.password, // Keep password in memory for this session
+      const payload = {
+        name: formData.name.trim(),
+        email: formData.email.trim().toLowerCase(),
+        password: formData.password,
+        phone: formData.phone.trim(),
+        department: formData.department,
       };
 
-      onSignup(newUser);
-    } catch (err) {
-      setErrors({
-        submit: err instanceof Error ? err.message : 'Failed to create supervisor account'
-      });
+      const response = await apiService.createSupervisor(payload);
+
+      if (response.error) {
+        throw new Error(response.error);
+      }
+
+      const createdUser = response.data?.user;
+
+      // Optional: pass to parent component
+      if (onSignup && createdUser) {
+        onSignup(createdUser);
+      }
+
+      // Optional: success callback (refresh list, toast, etc.)
+      if (onSuccess) onSuccess();
+
+      onClose(); // close modal on success
+    } catch (err: any) {
+      setSubmitError(
+        err.message ||
+          "Failed to create supervisor. Please try again."
+      );
     } finally {
       setIsLoading(false);
     }
@@ -142,115 +134,83 @@ export function SupervisorSignupForm({
               <UserPlus className="h-6 w-6" />
               <CardTitle>Create Supervisor Account</CardTitle>
             </div>
-            <Button variant="ghost" size="sm" onClick={onClose}>
+            <Button variant="ghost" size="sm" onClick={onClose} disabled={isLoading}>
               <X className="h-4 w-4" />
             </Button>
           </div>
-          <CardDescription>
-            Add a new supervisor to the system
-          </CardDescription>
+          <CardDescription>Add a new supervisor to the system</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <form onSubmit={handleSubmit} className="space-y-4">
+
+        <CardContent>
+          <form onSubmit={handleSubmit} className="space-y-5">
+            {/* Full Name */}
             <div className="space-y-2">
               <Label htmlFor="name">Full Name</Label>
               <Input
                 id="name"
-                type="text"
-                placeholder="Enter supervisor's full name"
                 value={formData.name}
-                onChange={(e) =>
-                  handleInputChange("name", e.target.value)
-                }
-                className={
-                  errors.name ? "border-destructive" : ""
-                }
+                onChange={(e) => handleChange("name", e.target.value)}
+                placeholder="Juan Dela Cruz"
+                disabled={isLoading}
+                className={errors.name ? "border-destructive" : ""}
               />
-              {errors.name && (
-                <p className="text-sm text-destructive">
-                  {errors.name}
-                </p>
-              )}
+              {errors.name && <p className="text-sm text-destructive">{errors.name}</p>}
             </div>
 
+            {/* Email */}
             <div className="space-y-2">
               <Label htmlFor="email">Email Address</Label>
               <Input
                 id="email"
                 type="email"
-                placeholder="Enter supervisor's email"
                 value={formData.email}
-                onChange={(e) =>
-                  handleInputChange("email", e.target.value)
-                }
-                className={
-                  errors.email ? "border-destructive" : ""
-                }
+                onChange={(e) => handleChange("email", e.target.value)}
+                placeholder="supervisor@company.ph"
+                disabled={isLoading}
+                className={errors.email ? "border-destructive" : ""}
               />
-              {errors.email && (
-                <p className="text-sm text-destructive">
-                  {errors.email}
-                </p>
-              )}
+              {errors.email && <p className="text-sm text-destructive">{errors.email}</p>}
             </div>
 
+            {/* Password */}
             <div className="space-y-2">
               <Label htmlFor="password">Password</Label>
               <Input
                 id="password"
                 type="password"
-                placeholder="Enter password"
                 value={formData.password}
-                onChange={(e) =>
-                  handleInputChange("password", e.target.value)
-                }
-                className={
-                  errors.password ? "border-destructive" : ""
-                }
+                onChange={(e) => handleChange("password", e.target.value)}
+                placeholder="••••••••"
+                disabled={isLoading}
+                className={errors.password ? "border-destructive" : ""}
               />
-              {errors.password && (
-                <p className="text-sm text-destructive">
-                  {errors.password}
-                </p>
-              )}
+              {errors.password && <p className="text-sm text-destructive">{errors.password}</p>}
             </div>
 
+            {/* Phone */}
             <div className="space-y-2">
               <Label htmlFor="phone">Phone Number</Label>
               <Input
                 id="phone"
                 type="tel"
-                placeholder="+639123456789 or 09123456789"
                 value={formData.phone}
-                onChange={(e) =>
-                  handleInputChange("phone", e.target.value)
-                }
-                className={
-                  errors.phone ? "border-destructive" : ""
-                }
+                onChange={(e) => handleChange("phone", e.target.value)}
+                placeholder="+639123456789"
+                disabled={isLoading}
+                className={errors.phone ? "border-destructive" : ""}
               />
-              {errors.phone && (
-                <p className="text-sm text-destructive">
-                  {errors.phone}
-                </p>
-              )}
+              {errors.phone && <p className="text-sm text-destructive">{errors.phone}</p>}
             </div>
 
+            {/* Department */}
             <div className="space-y-2">
               <Label htmlFor="department">Department</Label>
               <Select
                 value={formData.department}
-                onValueChange={(value) =>
-                  handleInputChange("department", value)
-                }
+                onValueChange={(v) => handleChange("department", v)}
+                disabled={isLoading}
               >
-                <SelectTrigger
-                  className={
-                    errors.department
-                      ? "border-destructive"
-                      : ""
-                  }
-                >
+                <SelectTrigger className={errors.department ? "border-destructive" : ""}>
                   <SelectValue placeholder="Select department" />
                 </SelectTrigger>
                 <SelectContent>
@@ -261,69 +221,57 @@ export function SupervisorSignupForm({
                   ))}
                 </SelectContent>
               </Select>
-              {errors.department && (
-                <p className="text-sm text-destructive">
-                  {errors.department}
-                </p>
-              )}
+              {errors.department && <p className="text-sm text-destructive">{errors.department}</p>}
             </div>
 
-            <div className="space-y-3 p-3 bg-muted/50 rounded-lg">
+            {/* Info box */}
+            <div className="p-4 bg-muted/50 rounded-lg space-y-3 text-sm">
               <div className="flex items-center gap-2">
                 <Shield className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm">
-                  Account Information
-                </span>
+                <span>Account Information</span>
               </div>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">
-                    Role:
-                  </span>
-                  <Badge variant="default">Supervisor</Badge>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">
-                    Secure ID:
-                  </span>
-                  <span className="font-mono text-xs">
-                    Auto-generated
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">
-                    Created by:
-                  </span>
-                  <span className="text-xs">Administrator</span>
-                </div>
+              <div className="grid grid-cols-2 gap-y-1.5">
+                <div className="text-muted-foreground">Role:</div>
+                <div><Badge>Supervisor</Badge></div>
+                <div className="text-muted-foreground">Secure ID:</div>
+                <div className="font-mono text-xs">Auto-generated</div>
+                <div className="text-muted-foreground">Created by:</div>
+                <div className="text-xs">Administrator</div>
               </div>
             </div>
 
-            {errors.submit && (
+            {/* Server-side error */}
+            {submitError && (
               <Alert variant="destructive">
-                <AlertDescription>{errors.submit}</AlertDescription>
+                <AlertDescription>{submitError}</AlertDescription>
               </Alert>
             )}
 
-            <div className="flex gap-2">
+            {/* Actions */}
+            <div className="flex gap-3 pt-2">
               <Button
                 type="button"
                 variant="outline"
                 onClick={onClose}
-                className="flex-1"
                 disabled={isLoading}
+                className="flex-1"
               >
                 Cancel
               </Button>
-              <Button type="submit" className="flex-1" disabled={isLoading}>
+
+              <Button
+                type="submit"
+                disabled={isLoading}
+                className="flex-1 gap-2"
+              >
                 {isLoading ? (
                   <>
-                    <div className="h-4 w-4 animate-spin border-2 border-white border-t-transparent rounded-full mr-2" />
+                    <Loader2 className="h-4 w-4 animate-spin" />
                     Creating...
                   </>
                 ) : (
                   <>
-                    <UserPlus className="h-4 w-4 mr-2" />
+                    <UserPlus className="h-4 w-4" />
                     Create Supervisor
                   </>
                 )}
