@@ -609,7 +609,7 @@ export function ProjectsGrid({ projects, users, currentUser, onCreateProject, on
                     </Button>
                   )
                 )}
-                {(currentUser.role === 'admin' ||
+                {/* {(currentUser.role === 'admin' ||
                   (currentUser.role === 'supervisor' && project.supervisorId === currentUser.id) ||
                   (currentUser.role === 'fabricator' && project.createdBy === currentUser.id)) && (
                     <Button
@@ -619,7 +619,7 @@ export function ProjectsGrid({ projects, users, currentUser, onCreateProject, on
                     >
                       Edit
                     </Button>
-                  )}
+                  )} */}
                 {currentUser.role === 'supervisor' && project.supervisorId === currentUser.id && (
                   <Button
                     variant="outline"

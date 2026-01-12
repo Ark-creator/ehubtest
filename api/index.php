@@ -60,6 +60,14 @@ switch ($method . ' ' . $path) {
         handle_create_project($pdo);
         break;
 
+    case 'GET /reports':
+        handle_get_reports($pdo);
+        break;
+
+    case 'POST /reports':
+        handle_create_report($pdo);
+        break;
+
     case 'GET /tasks':
         handle_get_tasks($pdo);
         break;
@@ -153,15 +161,168 @@ switch ($method . ' ' . $path) {
         // Simple manual router for dynamic paths
         if (preg_match('#^PUT /projects/([^/]+)$#', $method . ' ' . $path, $matches)) {
             handle_update_project($pdo, $matches[1]);
-        } elseif (preg_match('#^DELETE /projects/([^/]+)$#', $method . ' ' . $path, $matches)) {
-            handle_delete_project($pdo, $matches[1]);
+        } elseif (preg_match('#^PUT /reports/([^/]+)$#', $method . ' ' . $path, $matches)) {
+            handle_update_report($pdo, $matches[1]);
+        } elseif (preg_match('#^DELETE /reports/([^/]+)$#', $method . ' ' . $path, $matches)) {
+            handle_delete_report($pdo, $matches[1]);
         } else {
             json_response(['error' => 'Not found'], 404);
         }
 }
 
 // --- Handlers ---
+function handle_get_reports(PDO $pdo): void
+{
+    require_login();
+    $userId = $_SESSION['user_id'];
+    $role = $_SESSION['role'];
 
+    if ($role === 'admin') {
+        $sql = 'SELECT * FROM reports ORDER BY created_at DESC';
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute();
+    } elseif ($role === 'supervisor') {
+        $sql = 'SELECT * FROM reports WHERE created_by = :user_id OR status = "published" ORDER BY created_at DESC';
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([':user_id' => $userId]);
+    } else {
+        $sql = 'SELECT * FROM reports WHERE status = "published" ORDER BY created_at DESC';
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute();
+    }
+
+    $reports = $stmt->fetchAll();
+
+    foreach ($reports as &$report) {
+        $report['data'] = $report['data'] ? json_decode($report['data'], true) : [];
+        $report['filters'] = $report['filters'] ? json_decode($report['filters'], true) : [];
+    }
+
+    json_response($reports);
+}
+
+function handle_create_report(PDO $pdo): void
+{
+    require_login();
+
+    // Only admin or supervisor can create reports
+    if (!in_array($_SESSION['role'], ['admin', 'supervisor'])) {
+        json_response(['error' => 'Only admin or supervisor can create reports'], 403);
+    }
+
+    $body = sanitize_recursive(json_input());
+
+    if (empty($body['title']) || empty($body['type'])) {
+        json_response(['error' => 'Title and type are required'], 400);
+    }
+
+    $reportId = 'report-' . time() . '-' . random_int(100, 999);
+
+    $stmt = $pdo->prepare("
+        INSERT INTO reports 
+        (id, title, description, type, status, project_id, created_by, data, filters)
+        VALUES (:id, :title, :description, :type, :status, :project_id, :created_by, :data, :filters)
+    ");
+
+    $stmt->execute([
+        ':id' => $reportId,
+        ':title' => $body['title'],
+        ':description' => $body['description'] ?? null,
+        ':type' => $body['type'],
+        ':status' => $body['status'] ?? 'draft',
+        ':project_id' => $body['projectId'] ?? null,
+        ':created_by' => $_SESSION['user_id'],
+        ':data' => json_encode($body['data'] ?? []),
+        ':filters' => json_encode($body['filters'] ?? []),
+    ]);
+
+    $stmt = $pdo->prepare('SELECT * FROM reports WHERE id = :id');
+    $stmt->execute([':id' => $reportId]);
+    $report = $stmt->fetch();
+
+    $report['data'] = $report['data'] ? json_decode($report['data'], true) : [];
+    $report['filters'] = $report['filters'] ? json_decode($report['filters'], true) : [];
+
+    json_response($report, 201);
+}
+
+function handle_update_report(PDO $pdo, string $reportId): void
+{
+    require_login();
+
+    // Check ownership or admin
+    $check = $pdo->prepare('SELECT created_by FROM reports WHERE id = :id');
+    $check->execute([':id' => $reportId]);
+    $existing = $check->fetch();
+
+    if (!$existing || ($existing['created_by'] !== $_SESSION['user_id'] && $_SESSION['role'] !== 'admin')) {
+        json_response(['error' => 'Unauthorized'], 403);
+    }
+
+    $body = sanitize_recursive(json_input());
+
+    $fields = [];
+    $params = [':id' => $reportId];
+
+    $allowed = ['title', 'description', 'type', 'status'];
+    foreach ($allowed as $field) {
+        if (isset($body[$field])) {
+            $fields[] = "$field = :$field";
+            $params[":$field"] = $body[$field];
+        }
+    }
+
+    if (isset($body['projectId'])) {
+        $fields[] = 'project_id = :project_id';
+        $params[':project_id'] = $body['projectId'];
+    }
+
+    if (isset($body['data'])) {
+        $fields[] = 'data = :data';
+        $params[':data'] = json_encode($body['data']);
+    }
+
+    if (isset($body['filters'])) {
+        $fields[] = 'filters = :filters';
+        $params[':filters'] = json_encode($body['filters']);
+    }
+
+    if (empty($fields)) {
+        json_response(['message' => 'No changes provided']);
+    }
+
+    $sql = "UPDATE reports SET " . implode(', ', $fields) . ", updated_at = NOW() WHERE id = :id";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+
+    $stmt = $pdo->prepare('SELECT * FROM reports WHERE id = :id');
+    $stmt->execute([':id' => $reportId]);
+    $report = $stmt->fetch();
+
+    $report['data'] = $report['data'] ? json_decode($report['data'], true) : [];
+    $report['filters'] = $report['filters'] ? json_decode($report['filters'], true) : [];
+
+    json_response($report);
+}
+
+function handle_delete_report(PDO $pdo, string $reportId): void
+{
+    require_login();
+
+    // Check ownership or admin
+    $check = $pdo->prepare('SELECT created_by FROM reports WHERE id = :id');
+    $check->execute([':id' => $reportId]);
+    $existing = $check->fetch();
+
+    if (!$existing || ($existing['created_by'] !== $_SESSION['user_id'] && $_SESSION['role'] !== 'admin')) {
+        json_response(['error' => 'Unauthorized'], 403);
+    }
+
+    $stmt = $pdo->prepare('DELETE FROM reports WHERE id = :id');
+    $stmt->execute([':id' => $reportId]);
+
+    json_response(['message' => 'Report deleted successfully']);
+}
 // Update handle_create_project to support broadcasting to all supervisors
 function handle_create_project(PDO $pdo): void
 {
