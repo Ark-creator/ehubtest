@@ -225,42 +225,162 @@ function handle_me(PDO $pdo): void
 function handle_get_projects(PDO $pdo): void
 {
     require_login();
-    $stmt = $pdo->query('SELECT * FROM projects ORDER BY created_at DESC');
-    $projects = $stmt->fetchAll();
+
+    $userId = $_SESSION['user_id'];
+    $role = $_SESSION['role'];
+
+    $query = "
+        SELECT 
+            p.id, 
+            p.title AS name, 
+            p.description, 
+            p.status, 
+            p.priority, 
+            p.progress,
+            p.start_date, 
+            p.due_date, 
+            p.client_id, 
+            p.supervisor_id,
+            p.fabricator_ids, 
+            p.pending_supervisors, 
+            p.pending_assignments,
+            
+            -- Removed 'p.fabricator_budgets' to be safe (unless you added that column)
+            -- If you added it, put 'p.fabricator_budgets,' back here.
+            
+            p.budget, 
+            p.revenue, 
+            p.spent,
+            p.fabricator_allocation,
+            p.materials_allocation,
+            p.supervisor_allocation,
+            p.company_allocation,
+            p.documentation_url,
+
+            -- FIX: Simplified Client Name Fetching
+            (SELECT name FROM users WHERE id = p.client_id LIMIT 1) AS client_name
+
+        FROM projects p
+    ";
+
+    $params = [];
+
+    if ($role === 'supervisor') {
+        $query .= " WHERE p.supervisor_id = :uid OR JSON_CONTAINS(p.pending_supervisors, JSON_QUOTE(:uid)) ";
+        $params[':uid'] = $userId;
+    } elseif ($role === 'fabricator') {
+        $query .= " WHERE JSON_CONTAINS(p.fabricator_ids, JSON_QUOTE(:uid)) ";
+        $params[':uid'] = $userId;
+    }
+
+    $query .= " ORDER BY p.created_at DESC";
+
+    try {
+        $stmt = $pdo->prepare($query);
+        $stmt->execute($params);
+        $projects = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        json_response(['error' => 'Fetch Error: ' . $e->getMessage()], 500);
+    }
+
+    foreach ($projects as &$p) {
+        $p['fabricator_ids']       = json_decode($p['fabricator_ids'] ?? '[]', true) ?: [];
+        $p['pending_supervisors']  = json_decode($p['pending_supervisors'] ?? '[]', true) ?: [];
+        $p['pending_assignments']  = json_decode($p['pending_assignments'] ?? '[]', true) ?: [];
+        // Handle fabricator_budgets safely even if column is missing from query
+        $p['fabricator_budgets']   = isset($p['fabricator_budgets']) ? (json_decode($p['fabricator_budgets'], true) ?: []) : [];
+        
+        $p['revenue']               = (float)($p['revenue'] ?? 0);
+        $p['spent']                 = (float)($p['spent'] ?? 0);
+        $p['budget']                = (float)($p['budget'] ?? 0);
+        $p['fabricator_allocation'] = (float)($p['fabricator_allocation'] ?? 0);
+        $p['materials_allocation']  = (float)($p['materials_allocation'] ?? 0);
+        $p['supervisor_allocation'] = (float)($p['supervisor_allocation'] ?? 0);
+        $p['company_allocation']    = (float)($p['company_allocation'] ?? 0);
+        $p['progress']              = (int)($p['progress'] ?? 0);
+    }
+
     json_response($projects);
 }
-
 function handle_create_project(PDO $pdo): void
 {
     require_login();
     $body = sanitize_recursive(json_input());
 
     $projectId = 'project-' . time();
-
     $title = $body['name'] ?? $body['title'] ?? null;
+
     if (!$title) {
         json_response(['error' => 'Project title is required'], 400);
     }
 
-    $stmt = $pdo->prepare(
-        'INSERT INTO projects (id, title, description, status, priority, progress, start_date, due_date, budget, client_id, supervisor_id, fabricator_ids)
-         VALUES (:id, :title, :description, :status, :priority, :progress, :start_date, :due_date, :budget, :client_id, :supervisor_id, :fabricator_ids)'
-    );
+    // Helper to clean currency strings (e.g. "₱ 1,000.00" -> 1000.00)
+    function clean_money($val) {
+        if (is_numeric($val)) return $val;
+        return (float) preg_replace('/[^0-9.]/', '', (string)$val);
+    }
 
-    $stmt->execute([
-        ':id' => $projectId,
-        ':title' => $title,
-        ':description' => $body['description'] ?? null,
-        ':status' => $body['status'] ?? 'planning',
-        ':priority' => $body['priority'] ?? 'medium',
-        ':progress' => $body['progress'] ?? 0,
-        ':start_date' => $body['startDate'] ?? null,
-        ':due_date' => $body['endDate'] ?? ($body['dueDate'] ?? null),
-        ':budget' => $body['budget'] ?? null,
-        ':client_id' => $body['clientId'] ?? null,
-        ':supervisor_id' => $body['supervisorId'] ?? null,
-        ':fabricator_ids' => isset($body['fabricatorIds']) ? json_encode($body['fabricatorIds']) : json_encode([]),
-    ]);
+    $startDate = !empty($body['startDate']) ? date('Y-m-d', strtotime($body['startDate'])) : null;
+    $dueDate = !empty($body['endDate']) ? date('Y-m-d', strtotime($body['endDate'])) : 
+              (!empty($body['dueDate']) ? date('Y-m-d', strtotime($body['dueDate'])) : null);
+
+    $pendingSupervisors = [];
+    if (!empty($body['broadcastToSupervisors'])) {
+        $stmt = $pdo->query("SELECT id FROM users WHERE role = 'supervisor' AND is_active = 1");
+        $pendingSupervisors = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    }
+
+    $sql = 'INSERT INTO projects (
+        id, title, description, status, priority, progress, 
+        start_date, due_date, client_id, supervisor_id, 
+        fabricator_ids, pending_supervisors,
+        
+        budget, revenue, spent,
+        fabricator_allocation, materials_allocation, 
+        supervisor_allocation, company_allocation,
+        documentation_url
+    ) VALUES (
+        :id, :title, :description, :status, :priority, :progress, 
+        :start_date, :due_date, :client_id, :supervisor_id, 
+        :fabricator_ids, :pending_supervisors,
+        
+        :budget, :revenue, :spent,
+        :fabricator_allocation, :materials_allocation, 
+        :supervisor_allocation, :company_allocation,
+        :documentation_url
+    )';
+
+    $stmt = $pdo->prepare($sql);
+
+    try {
+        $stmt->execute([
+            ':id' => $projectId,
+            ':title' => $title,
+            ':description' => $body['description'] ?? null,
+            ':status' => $body['status'] ?? 'planning',
+            ':priority' => $body['priority'] ?? 'medium',
+            ':progress' => (int)($body['progress'] ?? 0),
+            ':start_date' => $startDate,
+            ':due_date' => $dueDate,
+            ':client_id' => $body['clientId'] ?? null,
+            ':supervisor_id' => $body['supervisorId'] ?? null,
+            ':fabricator_ids' => isset($body['fabricatorIds']) ? json_encode($body['fabricatorIds']) : json_encode([]),
+            ':pending_supervisors' => json_encode($pendingSupervisors),
+
+            // Clean money values before saving
+            ':budget' => clean_money($body['budget'] ?? 0),
+            ':revenue' => clean_money($body['totalProjectPrice'] ?? $body['revenue'] ?? 0),
+            ':spent' => clean_money($body['spent'] ?? 0),
+            ':fabricator_allocation' => clean_money($body['fabricatorAllocation'] ?? 0),
+            ':materials_allocation' => clean_money($body['materialsAllocation'] ?? 0),
+            ':supervisor_allocation' => clean_money($body['supervisorAllocation'] ?? 0),
+            ':company_allocation' => clean_money($body['companyAllocation'] ?? 0),
+            
+            ':documentation_url' => $body['documentationUrl'] ?? null
+        ]);
+    } catch (PDOException $e) {
+        json_response(['error' => 'Database Error: ' . $e->getMessage()], 500);
+    }
 
     $stmt = $pdo->prepare('SELECT * FROM projects WHERE id = :id LIMIT 1');
     $stmt->execute([':id' => $projectId]);
@@ -269,6 +389,93 @@ function handle_create_project(PDO $pdo): void
     json_response($project);
 }
 
+
+function handle_update_project(PDO $pdo): void
+{
+    require_login();
+    $body = sanitize_recursive(json_input());
+
+    if (empty($body['id'])) {
+        json_response(['error' => 'Project ID is required'], 400);
+    }
+
+    // Helper to clean money
+    function clean_money_update($val) {
+        if (is_numeric($val)) return $val;
+        return (float) preg_replace('/[^0-9.]/', '', (string)$val);
+    }
+
+    // 1. Format Dates
+    $startDate = !empty($body['startDate']) ? date('Y-m-d', strtotime($body['startDate'])) : null;
+    $dueDate = null;
+    if (!empty($body['endDate'])) {
+        $dueDate = date('Y-m-d', strtotime($body['endDate']));
+    } elseif (!empty($body['dueDate'])) {
+        $dueDate = date('Y-m-d', strtotime($body['dueDate']));
+    }
+
+    // 2. Prepare SQL Update
+    $sql = "UPDATE projects SET 
+            title = :title,
+            description = :description,
+            status = :status,
+            priority = :priority,
+            progress = :progress,
+            start_date = :start_date,
+            due_date = :due_date,
+            client_id = :client_id,
+            supervisor_id = :supervisor_id,
+            fabricator_ids = :fabricator_ids,
+            
+            -- NEW FINANCIAL FIELDS
+            budget = :budget,
+            revenue = :revenue,
+            spent = :spent,
+            fabricator_allocation = :fabricator_allocation,
+            materials_allocation = :materials_allocation,
+            supervisor_allocation = :supervisor_allocation,
+            company_allocation = :company_allocation,
+            documentation_url = :documentation_url
+            
+            WHERE id = :id";
+
+    $stmt = $pdo->prepare($sql);
+
+    try {
+        $stmt->execute([
+            ':id' => $body['id'],
+            ':title' => $body['name'] ?? $body['title'],
+            ':description' => $body['description'] ?? null,
+            ':status' => $body['status'],
+            ':priority' => $body['priority'],
+            ':progress' => (int)($body['progress'] ?? 0),
+            ':start_date' => $startDate,
+            ':due_date' => $dueDate,
+            ':client_id' => $body['clientId'] ?? null,
+            ':supervisor_id' => $body['supervisorId'] ?? null,
+            ':fabricator_ids' => isset($body['fabricatorIds']) ? json_encode($body['fabricatorIds']) : json_encode([]),
+            
+            // Financial Mappings
+            ':budget' => clean_money_update($body['budget'] ?? 0),
+            ':revenue' => clean_money_update($body['totalProjectPrice'] ?? $body['revenue'] ?? 0),
+            ':spent' => clean_money_update($body['spent'] ?? 0), // Now saves edits to Spent!
+            ':fabricator_allocation' => clean_money_update($body['fabricatorAllocation'] ?? 0),
+            ':materials_allocation' => clean_money_update($body['materialsAllocation'] ?? 0),
+            ':supervisor_allocation' => clean_money_update($body['supervisorAllocation'] ?? 0),
+            ':company_allocation' => clean_money_update($body['companyAllocation'] ?? 0),
+            ':documentation_url' => $body['documentationUrl'] ?? null
+        ]);
+    } catch (PDOException $e) {
+        json_response(['error' => 'Database Update Error: ' . $e->getMessage()], 500);
+    }
+
+    // Return the updated project
+    $stmt = $pdo->prepare('SELECT * FROM projects WHERE id = :id LIMIT 1');
+    $stmt->execute([':id' => $body['id']]);
+    $project = $stmt->fetch();
+
+    json_response($project);
+}
 function handle_get_tasks(PDO $pdo): void
 {
     require_login();

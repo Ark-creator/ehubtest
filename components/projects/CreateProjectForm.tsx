@@ -9,72 +9,74 @@ import { Alert, AlertDescription } from '../ui/alert';
 import { Calendar } from '../ui/calendar';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Badge } from '../ui/badge';
-import { X, Plus, CalendarIcon, Building, DollarSign } from 'lucide-react';
+import { X, Plus, CalendarIcon, Building, DollarSign, AlertCircle } from 'lucide-react';
 import { format } from 'date-fns';
 import { Project, User } from '../../types';
-// Removed embedded client creation dialog; it will be launched separately from the Projects page
 
 interface CreateProjectFormProps {
   currentUser: User;
   users: User[];
-  onCreateProject: (project: Omit<Project, 'id'>) => void | Promise<void> | Promise<Project>;
+  onCreateProject: (project: any) => Promise<void>;
   onClose: () => void;
+  onClientCreated?: (user: User) => void;
 }
 
 export function CreateProjectForm({ currentUser, users, onCreateProject, onClose }: CreateProjectFormProps) {
+  const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     description: '',
     priority: 'medium' as Project['priority'],
+    clientId: '',
     startDate: new Date(),
     endDate: new Date(new Date().setMonth(new Date().getMonth() + 1)),
     supervisorId: '',
     fabricatorIds: [] as string[],
-    fabricatorAllocation: '',
-    materialsAllocation: '',
-    supervisorAllocation: '',
-    companyAllocation: '',
-    totalProjectPrice: '',
-    supervisorAssignsFabricators: false, // New toggle state
+    
+    // Financials
+    totalProjectPrice: '', // Input: Revenue
+    fabricatorAllocation: '', // Expense
+    materialsAllocation: '', // Expense
+    supervisorAllocation: '', // Expense
+    companyAllocation: '', // Calculated: Profit/Margin
+    
+    supervisorAssignsFabricators: false,
     documentationUrl: ''
   });
+  
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [showStartCalendar, setShowStartCalendar] = useState(false);
   const [showEndCalendar, setShowEndCalendar] = useState(false);
 
   const supervisors = users.filter(u => u.role === 'supervisor');
   const fabricators = users.filter(u => u.role === 'fabricator');
+  const clients = users.filter(u => u.role === 'client');
 
+  // --- NEW LOGIC: Calculate Company Allocation (Excess) ---
   useEffect(() => {
-    const fabricator = parseFloat(formData.fabricatorAllocation) || 0;
-    const materials = parseFloat(formData.materialsAllocation) || 0;
-    const supervisor = parseFloat(formData.supervisorAllocation) || 0;
-    const company = parseFloat(formData.companyAllocation) || 0;
+    const total = parseFloat(formData.totalProjectPrice) || 0;
+    const fab = parseFloat(formData.fabricatorAllocation) || 0;
+    const mat = parseFloat(formData.materialsAllocation) || 0;
+    const sup = parseFloat(formData.supervisorAllocation) || 0;
 
-    const total = fabricator + materials + supervisor + company;
-    setFormData(prev => ({ ...prev, totalProjectPrice: total.toFixed(2) }));
+    // Company Allocation = Revenue - Expenses
+    const remaining = total - (fab + mat + sup);
+    
+    setFormData(prev => ({ ...prev, companyAllocation: remaining.toFixed(2) }));
   }, [
+    formData.totalProjectPrice,
     formData.fabricatorAllocation,
     formData.materialsAllocation,
-    formData.supervisorAllocation,
-    formData.companyAllocation
+    formData.supervisorAllocation
   ]);
 
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
 
-    if (!formData.name.trim()) {
-      newErrors.name = 'Project name is required';
-    }
-
-    if (!formData.description.trim()) {
-      newErrors.description = 'Project description is required';
-    }
-
-    if (!formData.supervisorId) {
-      newErrors.supervisorId = 'Supervisor selection is required';
-    }
-
+    if (!formData.name.trim()) newErrors.name = 'Project name is required';
+    if (!formData.description.trim()) newErrors.description = 'Project description is required';
+    if (!formData.supervisorId) newErrors.supervisorId = 'Supervisor selection is required';
+    
     if (!formData.supervisorAssignsFabricators && formData.fabricatorIds.length === 0) {
       newErrors.fabricatorIds = 'At least one fabricator must be assigned or supervisor must assign manually';
     }
@@ -83,13 +85,9 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
       newErrors.endDate = 'End date must be after start date';
     }
 
-    if (
-      (parseFloat(formData.fabricatorAllocation) || 0) < 0 ||
-      (parseFloat(formData.materialsAllocation) || 0) < 0 ||
-      (parseFloat(formData.supervisorAllocation) || 0) < 0 ||
-      (parseFloat(formData.companyAllocation) || 0) < 0
-    ) {
-      newErrors.totalProjectPrice = 'Allocations must be zero or positive numbers';
+    // Check if Company Allocation is negative (Over Budget)
+    if (parseFloat(formData.companyAllocation) < 0) {
+      newErrors.financial = 'Allocations exceed the Total Project Price.';
     }
 
     setErrors(newErrors);
@@ -100,6 +98,10 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
     setFormData(prev => ({ ...prev, [field]: value }));
     if (errors[field]) {
       setErrors(prev => ({ ...prev, [field]: '' }));
+    }
+    // Also clear general financial error when typing in any financial field
+    if (['totalProjectPrice', 'fabricatorAllocation', 'materialsAllocation', 'supervisorAllocation'].includes(field)) {
+       setErrors(prev => ({ ...prev, financial: '' }));
     }
   };
 
@@ -116,38 +118,53 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!validateForm()) {
-      return;
+    if (!validateForm()) return;
+
+    try {
+      setLoading(true);
+      const totalProjectPrice = parseFloat(formData.totalProjectPrice) || 0;
+      const shouldSupervisorAssign = formData.supervisorAssignsFabricators;
+      const initialStatus: Project['status'] = shouldSupervisorAssign ? '0_Created' : '1_Assigned_to_FAB';
+
+      const projectData = {
+        name: formData.name,
+        title: formData.name, 
+        description: formData.description,
+        clientId: formData.clientId || null,
+        status: initialStatus,
+        priority: formData.priority,
+        startDate: format(formData.startDate, 'yyyy-MM-dd'),
+        endDate: format(formData.endDate, 'yyyy-MM-dd'),
+        progress: 0,
+        supervisorId: formData.supervisorId,
+        fabricatorIds: formData.supervisorAssignsFabricators ? [] : formData.fabricatorIds,
+        documentationUrl: formData.documentationUrl || undefined,
+        
+        // --- FINANCIAL DATA ---
+        // Revenue is the Total Price input by user
+        revenue: totalProjectPrice, 
+        totalProjectPrice: totalProjectPrice,
+        
+        // Budget is also the Total Price (the pool of money available)
+        budget: totalProjectPrice, 
+        
+        // Spent is 0 (No actual work done yet)
+        spent: 0,
+
+        // Allocations (Breakdown of the Budget)
+        fabricatorAllocation: parseFloat(formData.fabricatorAllocation) || 0,
+        materialsAllocation: parseFloat(formData.materialsAllocation) || 0,
+        supervisorAllocation: parseFloat(formData.supervisorAllocation) || 0,
+        companyAllocation: parseFloat(formData.companyAllocation) || 0,
+      };
+
+      await onCreateProject(projectData);
+      onClose();
+    } catch (error) {
+      console.error("Error creating project:", error);
+    } finally {
+      setLoading(false);
     }
-
-    const totalProjectPrice = parseFloat(formData.totalProjectPrice);
-
-    const shouldSupervisorAssign = formData.supervisorAssignsFabricators;
-    const initialStatus: Project['status'] = shouldSupervisorAssign ? '0_Created' : '1_Assigned_to_FAB';
-
-    const newProject: Omit<Project, 'id'> = {
-      name: formData.name,
-      description: formData.description,
-      clientName: '',
-      status: initialStatus,
-      priority: formData.priority,
-      startDate: formData.startDate.toISOString().split('T')[0],
-      endDate: formData.endDate.toISOString().split('T')[0],
-      progress: 0,
-      supervisorId: formData.supervisorId,
-      fabricatorIds: formData.supervisorAssignsFabricators ? [] : formData.fabricatorIds,
-      budget: totalProjectPrice,
-      spent: 0,
-      revenue: 0,
-      documentationUrl: formData.documentationUrl || undefined,
-      createdBy: currentUser.id,
-      createdAt: new Date().toISOString(),
-      fabricatorBudgets: [],
-    };
-
-    await onCreateProject(newProject);
-    onClose();
-    try { window.location.hash = 'projects'; } catch { }
   };
 
   const getFabricatorName = (id: string) => {
@@ -163,7 +180,7 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
               <Building className="h-5 w-5" />
               Create New Project
             </CardTitle>
-            <Button variant="ghost" onClick={onClose}>
+            <Button variant="ghost" onClick={onClose} disabled={loading}>
               <X className="h-4 w-4" />
             </Button>
           </div>
@@ -186,6 +203,25 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
                     className={errors.name ? 'border-destructive' : ''}
                   />
                   {errors.name && <p className="text-sm text-destructive">{errors.name}</p>}
+                </div>
+                
+                <div className="space-y-2">
+                  <Label htmlFor="client">Client</Label>
+                  <Select 
+                    value={formData.clientId} 
+                    onValueChange={(value) => handleInputChange('clientId', value)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select Client (Optional)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {clients.map(client => (
+                        <SelectItem key={client.id} value={client.id}>
+                          {client.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
 
@@ -294,7 +330,7 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
                   <SelectContent>
                     {supervisors.map(supervisor => (
                       <SelectItem key={supervisor.id} value={supervisor.id}>
-                        {supervisor.name} - {supervisor.department}
+                        {supervisor.name}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -302,7 +338,6 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
                 {errors.supervisorId && <p className="text-sm text-destructive">{errors.supervisorId}</p>}
               </div>
 
-              {/* Supervisor assigns fabricators manually toggle */}
               <div className="flex items-center space-x-2">
                 <input
                   id="supervisorAssignsFabricators"
@@ -315,15 +350,7 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
                   Supervisor will assign fabricators manually
                 </Label>
               </div>
-              {formData.supervisorAssignsFabricators && (
-                <Alert>
-                  <AlertDescription>
-                    You can assign fabricators later from the project card using the Assign action.
-                  </AlertDescription>
-                </Alert>
-              )}
 
-              {/* Fabricators selection disabled if supervisor assigns manually */}
               {!formData.supervisorAssignsFabricators && (
                 <div className="space-y-2">
                   <Label>Fabricators *</Label>
@@ -336,7 +363,7 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
                         .filter(fab => !formData.fabricatorIds.includes(fab.id))
                         .map(fabricator => (
                           <SelectItem key={fabricator.id} value={fabricator.id}>
-                            {fabricator.name} - {fabricator.department}
+                            {fabricator.name}
                           </SelectItem>
                         ))}
                     </SelectContent>
@@ -364,40 +391,24 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
             <div className="space-y-4">
               <div className="flex items-end justify-between">
                 <h3 className="text-lg font-medium">Financial Allocation</h3>
-                <div className="text-sm text-muted-foreground">Total Project Price</div>
+                <div className="text-sm text-muted-foreground">Planning</div>
               </div>
 
-              {/* Financial Overview Preview */}
-              <div className="grid gap-4 md:grid-cols-3">
-                <Card>
-                  <CardContent className="pt-6">
-                    <div className="flex items-center gap-2">
-                      <DollarSign className="h-4 w-4 text-muted-foreground" />
-                      <span className="text-sm">Budget</span>
-                    </div>
-                    <p className="text-2xl">₱{(parseFloat(formData.totalProjectPrice) || 0).toLocaleString()}</p>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardContent className="pt-6">
-                    <div className="flex items-center gap-2">
-                      <DollarSign className="h-4 w-4 text-muted-foreground" />
-                      <span className="text-sm">Spent</span>
-                    </div>
-                    <p className="text-2xl">₱0</p>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardContent className="pt-6">
-                    <div className="flex items-center gap-2">
-                      <DollarSign className="h-4 w-4 text-muted-foreground" />
-                      <span className="text-sm">Revenue</span>
-                    </div>
-                    <p className="text-2xl">₱0</p>
-                  </CardContent>
-                </Card>
+              {/* Input for Total Price */}
+              <div className="space-y-2">
+                <Label htmlFor="totalProjectPrice" className="text-lg font-semibold text-primary">
+                  Total Project Price (Revenue) ₱
+                </Label>
+                <Input
+                  id="totalProjectPrice"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={formData.totalProjectPrice}
+                  onChange={(e) => handleInputChange('totalProjectPrice', e.target.value)}
+                  placeholder="e.g. 100000"
+                  className="text-lg font-bold"
+                />
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
@@ -412,7 +423,7 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
                     onChange={(e) => handleInputChange('fabricatorAllocation', e.target.value)}
                     placeholder="0.00"
                   />
-                  <p className="text-xs text-muted-foreground">Labor costs allocated to fabricators.</p>
+                  <p className="text-xs text-muted-foreground">Labor costs for fabricators.</p>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="materialsAllocation">Materials Allocation (₱)</Label>
@@ -425,7 +436,7 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
                     onChange={(e) => handleInputChange('materialsAllocation', e.target.value)}
                     placeholder="0.00"
                   />
-                  <p className="text-xs text-muted-foreground">Expected material expenses.</p>
+                  <p className="text-xs text-muted-foreground">Expected material costs.</p>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="supervisorAllocation">Supervisor Allocation (₱)</Label>
@@ -438,39 +449,38 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
                     onChange={(e) => handleInputChange('supervisorAllocation', e.target.value)}
                     placeholder="0.00"
                   />
-                  <p className="text-xs text-muted-foreground">Supervisor fees or overhead.</p>
+                  <p className="text-xs text-muted-foreground">Supervisor fees/overhead.</p>
                 </div>
+                
+                {/* Calculated Company Allocation */}
                 <div className="space-y-2">
-                  <Label htmlFor="companyAllocation">Company Allocation (₱)</Label>
-                  <Input
-                    id="companyAllocation"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={formData.companyAllocation}
-                    onChange={(e) => handleInputChange('companyAllocation', e.target.value)}
-                    placeholder="0.00"
-                  />
-                  <p className="text-xs text-muted-foreground">Company margin and other costs.</p>
-                </div>
-                <div className="space-y-2 md:col-span-2">
-                  <Label className="flex items-center justify-between">
-                    <span>Total Project Price (₱)</span>
-                    <span className="text-muted-foreground">Auto-calculated</span>
+                  <Label htmlFor="companyAllocation" className="flex items-center gap-2">
+                    Company Allocation (Profit)
+                    {parseFloat(formData.companyAllocation) < 0 && (
+                      <Badge variant="destructive" className="text-xs">Over Budget</Badge>
+                    )}
                   </Label>
                   <Input
+                    id="companyAllocation"
                     readOnly
-                    value={formData.totalProjectPrice}
-                    placeholder="0.00"
+                    value={formData.companyAllocation}
+                    className={`font-medium ${parseFloat(formData.companyAllocation) < 0 ? 'border-destructive text-destructive' : 'bg-muted'}`}
                   />
+                  <p className="text-xs text-muted-foreground">Auto-calculated (Total - Allocations).</p>
                 </div>
               </div>
+              
+              {errors.financial && (
+                <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 p-3 rounded-md">
+                  <AlertCircle className="h-4 w-4" />
+                  {errors.financial}
+                </div>
+              )}
             </div>
 
             {/* Documentation */}
             <div className="space-y-4">
               <h3>Documentation (Optional)</h3>
-
               <div className="space-y-2">
                 <Label htmlFor="documentationUrl">Google Drive Documentation URL</Label>
                 <Input
@@ -483,21 +493,17 @@ export function CreateProjectForm({ currentUser, users, onCreateProject, onClose
               </div>
             </div>
 
-            {Object.keys(errors).length > 0 && (
-              <Alert variant="destructive">
-                <AlertDescription>
-                  Please fix the errors above before submitting.
-                </AlertDescription>
-              </Alert>
-            )}
-
             <div className="flex gap-4">
-              <Button type="button" variant="outline" onClick={onClose} className="flex-1">
+              <Button type="button" variant="outline" onClick={onClose} className="flex-1" disabled={loading}>
                 Cancel
               </Button>
-              <Button type="submit" className="flex-1">
-                <Plus className="h-4 w-4 mr-2" />
-                Create Project
+              <Button type="submit" className="flex-1" disabled={loading}>
+                {loading ? 'Creating...' : (
+                  <>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Create Project
+                  </>
+                )}
               </Button>
             </div>
           </form>
