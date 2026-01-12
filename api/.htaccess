@@ -1,16 +1,31 @@
+# <IfModule mod_rewrite.c>
+#   RewriteEngine On
+
+#   # Ensure the base is the current directory
+#   RewriteBase /api/
+
+#   # If the requested file or directory exists, serve it directly
+#   RewriteCond %{REQUEST_FILENAME} -f [OR]
+#   RewriteCond %{REQUEST_FILENAME} -d
+#   RewriteRule ^ - [L]
+
+#   # Otherwise, send everything to index.php
+#   RewriteRule ^ index.php [L]
+# </IfModule>
+
+
+
 <IfModule mod_rewrite.c>
-  RewriteEngine On
+    RewriteEngine On
 
-  # Ensure the base is the current directory
-  RewriteBase /api/
+    # Allow Authorization header to pass to PHP (Critical for APIs)
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 
-  # If the requested file or directory exists, serve it directly
-  RewriteCond %{REQUEST_FILENAME} -f [OR]
-  RewriteCond %{REQUEST_FILENAME} -d
-  RewriteRule ^ - [L]
-
-  # Otherwise, send everything to index.php
-  RewriteRule ^ index.php [L]
+    # If the requested file or directory exists, serve it directly
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    
+    # Send everything else to index.php
+    RewriteRule ^ index.php [QSA,L]
 </IfModule>
-
-

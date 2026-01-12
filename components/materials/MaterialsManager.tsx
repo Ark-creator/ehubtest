@@ -174,7 +174,7 @@ export function MaterialsManager({
         <div>
           <h2 className="flex items-center gap-2">
             <Package className="h-5 w-5" />
-            Materials Management
+            Materials Management {materials.length}
           </h2>
           <p className="text-muted-foreground">Manage materials and inventory for your projects</p>
         </div>
